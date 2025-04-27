@@ -54,7 +54,8 @@ export async function generateResponse(
 			id: userName,
 			userName,
 			messages: [],
-			private_info: [],
+			memoryKeys: [],
+			importantKeys: [],
 		};
 		userHistory.push(history);
 	}
@@ -70,9 +71,15 @@ export async function generateResponse(
 				},
 				{
 					role: 'system',
-					content: `需要被記得的個人資訊 : ${history.private_info.join(
-						`、`,
-					)}使用者名稱為 **${history.userName}**，請適時參照資料給予回覆。`,
+					content: `需要被記得的個人資訊 : ${history.memoryKeys.join(`、`)}`,
+				},
+				{
+					role: 'system',
+					content: `需要被記得的重要資訊 : ${history.importantKeys.join(`、`)}`,
+				},
+				{
+					role: 'system',
+					content: ` 使用者名稱為 **${history.userName}**，請適時參照資料給予回覆。`,
 				},
 				{
 					role: 'system',
@@ -126,9 +133,15 @@ export async function generateResponse(
 	}
 	try {
 		const data = JSON.parse(result.choices[0]?.message.content ?? '');
-		const private_info = data.private_info ?? [];
-		if (private_info.length > 0) {
-			history.private_info.push(...private_info);
+		const memoryKeys = data.memoryKeys ?? [];
+		const importantKeys = data.importantKeys ?? [];
+		if (memoryKeys.length > 0) {
+			history.memoryKeys = [...new Set([...history.memoryKeys, ...memoryKeys])];
+		}
+		if (importantKeys.length > 0) {
+			history.importantKeys = [
+				...new Set([...history.importantKeys, ...importantKeys]),
+			];
 		}
 		history.messages.push({
 			message: [

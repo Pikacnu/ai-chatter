@@ -8,7 +8,8 @@ export type UserHistory = {
 		];
 		timestamp: number;
 	}>;
-	private_info: string[];
+	importantKeys: string[]; // Keys for important data about the user
+	memoryKeys: string[]; // Keys for memory-related data
 };
 
 export type Message = {

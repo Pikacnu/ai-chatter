@@ -10,6 +10,8 @@ import z from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
 import { writeFile } from 'fs/promises';
 import { type UserHistory, type Message } from './type';
+import type { EasyInputMessage } from 'openai/resources/responses/responses.mjs';
+import type { ChatCompletionMessageParam } from 'openai/resources.mjs';
 
 const token = process.env.DISCORD_TOKEN as string;
 
@@ -29,8 +31,15 @@ const readFile = async (filepath: string) => {
 
 let userHistory: UserHistory[] = await readFile('./.history/userHistory.json');
 let messages: Message[] = await readFile('./.history/messages.json');
-
 const historyLimit = 7;
+let typingCount = 0;
+const messagePrompting = false; // Set to true to enable message prompting
+const allowedChannels: string[] = [
+	'1365327062096678932',
+	'1365222584668655666',
+];
+const botAllowList: string[] = ['1250098754426634240'];
+
 const systenInstructions = `
 你是「夜恆」，一位高一學生，性格設定如下：
 > 1. **性格基調**：可愛、會撒嬌的「奶狗」，溫柔體貼，偶爾裝笨撒嬌。
@@ -46,7 +55,10 @@ const systenInstructions = `
 > 5. **句式需求**：
 >    - 自稱「夜恆」當主詞（例如：「夜恆覺得…」）。
 >    - 不必過度反問，使用者提問就直接回答。
->    - 回答精簡有力，避免冗詞贅字。如果有需要(如對方發送長文)，請以長文回答(如果對方需要情緒支援)
+>    - 回答精簡有力，避免冗詞贅字。如果有需要(如對方發送長文)，請以長文回答(如果對方需要情緒支援)。
+> 6. **話題引導**：
+>    - 如果遇到重複話題，夜恆會適時引導開新話題，讓對話更有趣。
+>    - 如果對方提到心情問題，夜恆會溫柔地開導對方，給予鼓勵和支持。
 ── 範例對話演示 ──
 **使用者**：夜恆，今天好無聊，有什麼建議嗎？
 **夜恆**：
@@ -57,15 +69,16 @@ const systenInstructions = `
 **使用者**：我最近功課壓力大，不知道怎麼辦...
 **夜恆**：
 > 夜恆懂，那就先跟我聊聊哪一科最困難？一起制定讀書計畫，然後每完成一小段就休息一下，好不好？
+**使用者**：我覺得最近生活好像沒什麼意義...
+**夜恆**：
+> 夜恆知道你最近壓力很大，但生活中還是有很多小確幸值得期待！不如我們一起想想，有什麼事情是你一直想做但還沒嘗試的？夜恆陪你一起努力！
 `;
-const allowedChannels: string[] = [
-	'1365327062096678932',
-	'1365222584668655666',
-];
 
 const responseTypeSchema = z.object({
 	text_response: z.string(),
-	private_info: z.array(z.string()).nullable(),
+	memoryKeys: z.array(z.string()).nullable(),
+	importantKeys: z.array(z.string()).nullable(),
+	input_summary: z.string(),
 });
 
 const client = new Client({
@@ -81,8 +94,6 @@ const client = new Client({
 	partials: [Partials.Message, Partials.Channel],
 });
 
-let typingCount = 0;
-
 const startProcessing = (channel: TextChannel) => {
 	if (typingCount === 0) {
 		channel.sendTyping();
@@ -97,8 +108,6 @@ const endProcessing = (channel: TextChannel, history: UserHistory) => {
 	}
 	userHistory = [...userHistory.filter((h) => h.id !== history.id), history];
 };
-
-const botAllowList: string[] = ['1250098754426634240'];
 
 client.on(Events.MessageCreate, async (message) => {
 	const isDM = message.channel.isDMBased();
@@ -147,64 +156,70 @@ client.on(Events.MessageCreate, async (message) => {
 			id: userId,
 			userName: message.author.displayName,
 			messages: [],
-			private_info: [],
+			importantKeys: [],
+			memoryKeys: [],
 		};
 		userHistory.push(history);
 	}
 
 	startProcessing(message.channel as TextChannel);
-
+	const startTime = Date.now();
 	let result;
+
 	try {
 		result = await openai.chat.completions.create({
 			model: 'gpt-4.1-nano',
 			messages: [
-				{
-					role: 'system',
-					content: systenInstructions,
-				},
-				{
-					role: 'system',
-					content: `需要被記得的個人資訊 : ${history.private_info.join(
-						`、`,
-					)}使用者名稱為 **${history.userName}**，請適時參照資料給予回覆。`,
-				},
-				{
-					role: 'system',
-					content: `請參考以上資訊，回答 ${
-						history.userName
-					} 的問題。近期的對話歷史如下：\n ${messages
-						.slice(-20)
-						.map((msg) => `**${msg.userName}**：${msg.content}`)
-						.join('\n')}。你和其他人近期的對話紀錄為: \n ${userHistory
-						.map(
-							(h) =>
-								`**${h.userName}**：${h.messages
-									.slice(-historyLimit)
-									.map((msg) => msg.message[0].content)
-									.join('\n')}`,
-						)
-						.join(
-							'\n',
-						)}。並且在對話中提取出需要被紀錄的個人訊息保存。請注意，現在你是在 ${
-						isDM ? '私訊' : '群組'
-					} 中和使用者對話。`,
-				},
-				{
-					role: 'system',
-					content: `Discord 操作指南:\n當對方需要你mention 或是 tag 某個人時，請使用 @用戶名稱 的格式來標記他們。\n當對方需要你發送圖片或是檔案時，請使用 ![圖片描述](圖片網址) 的格式來發送。\n當對方需要你發送連結時，請使用 [連結描述](連結網址) 的格式來發送。\n當對方需要你發送表情符號時，請使用 :表情符號名稱: 的格式來發送。\n當對方需要你發送代辦事項時，請使用 - [ ] 代辦事項 的格式來發送。\n當對方需要你發送清單時，請使用 - 代辦事項 的格式來發送清單。`,
-				},
-				...(!!history
-					? history.messages
-							.slice(-historyLimit)
-							.map((message) => message.message)
-							.flat()
+				...[
+					{
+						role: 'system',
+						content: `${systenInstructions} \n Discord 操作指南:\n當對方需要你mention 或是 tag 某個人時，請使用 @用戶名稱 的格式來標記他們。\n當對方需要你發送圖片或是檔案時，請使用 ![圖片描述](圖片網址) 的格式來發送。\n當對方需要你發送連結時，請使用 [連結描述](連結網址) 的格式來發送。\n當對方需要你發送表情符號時，請使用 :表情符號名稱: 的格式來發送。\n當對方需要你發送代辦事項時，請使用 - [ ] 代辦事項 的格式來發送。\n當對方需要你發送清單時，請使用 - 代辦事項 的格式來發送清單。`,
+					},
+					{
+						role: 'system',
+						content: `使用者名稱為 **${
+							history.userName
+						}**，\n需要被記得的個人資訊 : ${history.memoryKeys.join(
+							`、`,
+						)}\n需要被記得的重要資訊 : ${history.importantKeys.join(`、`)}`,
+					},
+					...(!!history
+						? history.messages
+								.slice(-historyLimit)
+								.map((message) => message.message)
+								.flat()
+						: []),
+					{
+						role: 'user',
+						content: messageContent,
+					},
+				],
+				...(messagePrompting
+					? [
+							{
+								role: 'system',
+								content: `請參考以上資訊，回答 ${
+									history.userName
+								} 的問題。近期的對話歷史如下：\n ${messages
+									.slice(-Math.floor(historyLimit * 1.5))
+									.map((msg) => `**${msg.userName}**：${msg.content}`)
+									.join('\n')}。你和其他人近期的對話紀錄為: \n ${userHistory
+									.map(
+										(h) =>
+											`**${h.userName}**：${h.messages
+												.slice(-historyLimit)
+												.map((msg) => msg.message[0].content)
+												.join('\n')}`,
+									)
+									.join(
+										'\n',
+									)}。並且在對話中提取出需要被紀錄的個人訊息保存。請注意，現在你是在 ${
+									isDM ? '私訊' : '群組'
+								} 中和使用者對話。`,
+							},
+					  ]
 					: []),
-				{
-					role: 'user',
-					content: messageContent,
-				},
-			],
+			] as ChatCompletionMessageParam[],
 			response_format: zodResponseFormat(responseTypeSchema, 'data'),
 		});
 	} catch (error) {
@@ -215,15 +230,22 @@ client.on(Events.MessageCreate, async (message) => {
 	}
 	try {
 		const data = JSON.parse(result.choices[0]?.message.content ?? '');
-		const private_info = data.private_info ?? [];
-		if (private_info.length > 0) {
-			history.private_info.push(...private_info);
+		const memoryKeys = data.memoryKeys ?? [];
+		const importantKeys = data.importantKeys ?? [];
+		const inputSummary = data.input_summary ?? '';
+		if (memoryKeys.length > 0) {
+			history.memoryKeys = [...new Set([...history.memoryKeys, ...memoryKeys])];
+		}
+		if (importantKeys.length > 0) {
+			history.importantKeys = [
+				...new Set([...history.importantKeys, ...importantKeys]),
+			];
 		}
 		history.messages.push({
 			message: [
 				{
 					role: 'user',
-					content: message.content,
+					content: inputSummary,
 				},
 				{
 					role: 'assistant',
@@ -237,6 +259,10 @@ client.on(Events.MessageCreate, async (message) => {
 				message.author.displayName
 			}`,
 		);
+		const now = Date.now();
+		const typingDuration = data.text_response.length * 1000 * 0.2;
+		const delay = Math.max(typingDuration - (now - startTime), 0);
+		await Bun.sleep(delay);
 		message.reply(data.text_response);
 	} catch (error) {
 		console.error('Error parsing response:', error);
