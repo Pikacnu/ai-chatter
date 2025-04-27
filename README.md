@@ -12,4 +12,19 @@ To run:
 bun run index.ts
 ```
 
-This project was created using `bun init` in bun v1.2.9. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+> **ℹ️ Info**  
+> By default, only `discord.ts` will be executed initially.
+
+> **⚠️ Danger**  
+> Running `instagram.ts` may cause Meta to block your account. Proceed with caution.
+
+## Environment Example
+
+Create a `.env` file in the root directory with the following structure:
+
+```
+DISCORD_TOKEN="..."
+OPENAI_API_KEY="..."
+IG_USERNAME=""
+IG_PASSWORD=""
+```
