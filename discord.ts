@@ -10,14 +10,36 @@ import z from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
 import { writeFile } from 'fs/promises';
 import { type UserHistory, type Message } from './type';
-import type { EasyInputMessage } from 'openai/resources/responses/responses.mjs';
 import type { ChatCompletionMessageParam } from 'openai/resources.mjs';
 
 const token = process.env.DISCORD_TOKEN as string;
 
-const openai = new OPENAI({
+enum Providor {
+	OPENAI,
+	GEMINI,
+	XAI,
+}
+
+let openai = new OPENAI({
 	apiKey: process.env.OPENAI_API_KEY as string,
 });
+let providor = Providor.OPENAI;
+
+if (process.env.GEMINI_API_KEY) {
+	openai = new OPENAI({
+		apiKey: process.env.GEMINI_API_KEY as string,
+		baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+	});
+	providor = Providor.GEMINI;
+}
+
+if (process.env.XAI_API_KEY) {
+	openai = new OPENAI({
+		apiKey: process.env.XAI_API_KEY as string,
+		baseURL: 'https://api.x.ai/v1',
+	});
+	providor = Providor.XAI;
+}
 
 const readFile = async (filepath: string) => {
 	try {
@@ -33,7 +55,7 @@ let userHistory: UserHistory[] = await readFile('./.history/userHistory.json');
 let messages: Message[] = await readFile('./.history/messages.json');
 const historyLimit = 7;
 let typingCount = 0;
-const messagePrompting = false; // Set to true to enable message prompting
+const messagePrompting = true; // Set to true to enable message prompting
 const allowedChannels: string[] = [
 	'1365327062096678932',
 	'1365222584668655666',
@@ -74,12 +96,21 @@ const systenInstructions = `
 > 夜恆知道你最近壓力很大，但生活中還是有很多小確幸值得期待！不如我們一起想想，有什麼事情是你一直想做但還沒嘗試的？夜恆陪你一起努力！
 `;
 
-const responseTypeSchema = z.object({
+const openAIResponseTypeSchema = z.object({
 	text_response: z.string(),
 	memoryKeys: z.array(z.string()).nullable(),
 	importantKeys: z.array(z.string()).nullable(),
 	input_summary: z.string(),
 });
+
+const geminiResponseTypeSchema = z.object({
+	text_response: z.string(),
+	memoryKeys: z.array(z.string()).optional(),
+	importantKeys: z.array(z.string()).optional(),
+	input_summary: z.string(),
+});
+
+type ResponseType = z.infer<typeof openAIResponseTypeSchema>;
 
 const client = new Client({
 	intents: [
@@ -167,69 +198,98 @@ client.on(Events.MessageCreate, async (message) => {
 	let result;
 
 	try {
-		result = await openai.chat.completions.create({
-			model: 'gpt-4.1-nano',
-			messages: [
-				...[
-					{
-						role: 'system',
-						content: `${systenInstructions} \n Discord 操作指南:\n當對方需要你mention 或是 tag 某個人時，請使用 @用戶名稱 的格式來標記他們。\n當對方需要你發送圖片或是檔案時，請使用 ![圖片描述](圖片網址) 的格式來發送。\n當對方需要你發送連結時，請使用 [連結描述](連結網址) 的格式來發送。\n當對方需要你發送表情符號時，請使用 :表情符號名稱: 的格式來發送。\n當對方需要你發送代辦事項時，請使用 - [ ] 代辦事項 的格式來發送。\n當對方需要你發送清單時，請使用 - 代辦事項 的格式來發送清單。`,
-					},
-					{
-						role: 'system',
-						content: `使用者名稱為 **${
-							history.userName
-						}**，\n需要被記得的個人資訊 : ${history.memoryKeys.join(
-							`、`,
-						)}\n需要被記得的重要資訊 : ${history.importantKeys.join(`、`)}`,
-					},
-					...(!!history
-						? history.messages
-								.slice(-historyLimit)
-								.map((message) => message.message)
-								.flat()
-						: []),
-					{
-						role: 'user',
-						content: messageContent,
-					},
-				],
-				...(messagePrompting
-					? [
-							{
-								role: 'system',
-								content: `請參考以上資訊，回答 ${
-									history.userName
-								} 的問題。近期的對話歷史如下：\n ${messages
-									.slice(-Math.floor(historyLimit * 1.5))
-									.map((msg) => `**${msg.userName}**：${msg.content}`)
-									.join('\n')}。你和其他人近期的對話紀錄為: \n ${userHistory
+		const prompts = [
+			...[
+				{
+					role: 'system',
+					content: `${systenInstructions} \n Discord 操作指南:\n當對方需要你mention 或是 tag 某個人時，請使用 @用戶名稱 的格式來標記他們。\n當對方需要你發送圖片或是檔案時，請使用 ![圖片描述](圖片網址) 的格式來發送。\n當對方需要你發送連結時，請使用 [連結描述](連結網址) 的格式來發送。\n當對方需要你發送表情符號時，請使用 :表情符號名稱: 的格式來發送。\n當對方需要你發送代辦事項時，請使用 - [ ] 代辦事項 的格式來發送。\n當對方需要你發送清單時，請使用 - 代辦事項 的格式來發送清單。`,
+				},
+				{
+					role: 'system',
+					content: `使用者名稱為 **${
+						history.userName
+					}**，\n需要被記得的個人資訊 : ${history.memoryKeys.join(
+						`、`,
+					)}\n需要被記得的重要資訊 : ${history.importantKeys.join(`、`)}
+					，並且在對話中找出需要被紀錄的個人訊息並輸出。請注意，現在你是在 ${
+						isDM ? '私訊' : '群組'
+					} 中和使用者對話。`,
+				},
+				...(!!history
+					? history.messages
+							.slice(Math.floor(-historyLimit / 2))
+							.map((message) => message.message)
+							.flat()
+					: []),
+				{
+					role: 'user',
+					content: messageContent,
+				},
+			],
+			...(messagePrompting
+				? [
+						{
+							role: 'system',
+							content: `近期的對話歷史如下：\n ${messages
+								.slice(-Math.floor(historyLimit / 2))
+								.map((msg) => `**${msg.userName}**：${msg.content}`)
+								.join('\n')}。`,
+						},
+						{
+							role: 'system',
+							content: `
+								你和其他人近期的對話紀錄為: \n ${userHistory
 									.map(
 										(h) =>
 											`**${h.userName}**：${h.messages
-												.slice(-historyLimit)
+												.slice(Math.floor(-historyLimit / 2.5))
 												.map((msg) => msg.message[0].content)
 												.join('\n')}`,
 									)
-									.join(
-										'\n',
-									)}。並且在對話中提取出需要被紀錄的個人訊息保存。請注意，現在你是在 ${
-									isDM ? '私訊' : '群組'
-								} 中和使用者對話。`,
-							},
-					  ]
-					: []),
-			] as ChatCompletionMessageParam[],
-			response_format: zodResponseFormat(responseTypeSchema, 'data'),
-		});
+									.join('\n')}。`,
+						},
+				  ]
+				: []),
+		];
+
+		if (providor === Providor.OPENAI) {
+			result = await openai.chat.completions.create({
+				model: 'gpt-4.1-nano',
+				messages: prompts as ChatCompletionMessageParam[],
+				response_format: zodResponseFormat(openAIResponseTypeSchema, 'data'),
+			});
+		} else if (providor === Providor.GEMINI) {
+			result = await openai.beta.chat.completions.parse({
+				model: 'gemini-2.0-flash',
+				messages: prompts as ChatCompletionMessageParam[],
+				response_format: zodResponseFormat(geminiResponseTypeSchema, 'data'),
+			});
+		} else if (providor === Providor.XAI) {
+			result = await openai.chat.completions.create({
+				model: 'grok-3-mini-fast',
+				messages: prompts as ChatCompletionMessageParam[],
+				response_format: zodResponseFormat(openAIResponseTypeSchema, 'data'),
+			});
+		} else {
+			throw new Error('Unsupported provider');
+		}
 	} catch (error) {
-		console.error('Error in OpenAI API:', error);
+		console.error('Error in OpenAI API:\n', error);
 		message.reply('抱歉，我無法回答這個問題。');
 		endProcessing(message.channel as TextChannel, history);
 		return;
 	}
 	try {
-		const data = JSON.parse(result.choices[0]?.message.content ?? '');
+		let data: ResponseType;
+		if (providor === Providor.OPENAI || providor === Providor.XAI) {
+			data = JSON.parse(
+				result.choices[0]?.message.content ?? '',
+			) as ResponseType;
+		} else if (providor === Providor.GEMINI) {
+			data = (result.choices[0]?.message as any).parsed ?? ({} as ResponseType);
+		} else {
+			throw new Error('Unsupported provider');
+		}
 		const memoryKeys = data.memoryKeys ?? [];
 		const importantKeys = data.importantKeys ?? [];
 		const inputSummary = data.input_summary ?? '';
@@ -260,7 +320,7 @@ client.on(Events.MessageCreate, async (message) => {
 			}`,
 		);
 		const now = Date.now();
-		const typingDuration = data.text_response.length * 1000 * 0.2;
+		const typingDuration = data.text_response.length * 1000 * 0.15;
 		const delay = Math.max(typingDuration - (now - startTime), 0);
 		await Bun.sleep(delay);
 		message.reply(data.text_response);
